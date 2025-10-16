@@ -277,11 +277,31 @@ def parse_web_data(html_content):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Parse radio frequency data from a file, URL or stdin and format it for GQRX bookmarks.",
-        epilog="Examples:\n"
-               "  gmark.py --input-file freqs.txt bookmarks.csv\n"
-               "  gmark.py --url http://example.com/freqs bookmarks.csv\n"
-               "  cat freqs.txt | gmark.py bookmarks.csv"
+        description="A powerful tool to generate GQRX bookmark files from websites, local files, or text input. "
+                    "It intelligently parses frequency data and can use AI language models to automatically "
+                    "categorize and tag the frequencies.",
+        epilog="""
+Usage Examples:
+
+  # Basic URL parsing (with AI tagging by default)
+  gmark.py --url https://www.radioreference.com/db/browse/coid/1 bookmarks.csv
+
+  # Parsing from a local file without AI tagging
+  gmark.py --input-file my_freqs.txt --no-ai bookmarks.csv
+
+  # Piping text from another command
+  cat my_freqs.txt | gmark.py bookmarks.csv
+
+  # Using a specific Ollama model for tagging
+  gmark.py --url <URL> --ollama-model "llama2:13b" bookmarks.csv
+
+  # Listing available models from your Ollama server
+  gmark.py --list-ollama-models
+
+  # Using a different AI provider (once implemented)
+  # gmark.py --url <URL> --ai-provider openai --api-key "sk-..." bookmarks.csv
+""",
+        formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument("output_file", nargs='?', default=None, help="Output CSV file for GQRX bookmarks. Required unless listing models.")
     input_group = parser.add_mutually_exclusive_group()
