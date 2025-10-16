@@ -6,6 +6,7 @@ import os
 import argparse
 import re
 import urllib.request
+import json
 from bs4 import BeautifulSoup
 
 def convert_frequency(freq, unit="mhz"):
@@ -70,6 +71,103 @@ def get_web_content(url):
     except Exception as e:
         print(f"Error fetching URL {url}: {e}", file=sys.stderr)
         return None
+
+# --- AI Service Framework ---
+
+class AIService:
+    def __init__(self, args):
+        self.args = args
+
+    def list_models(self):
+        raise NotImplementedError
+
+    def generate_tags(self, frequency_data):
+        raise NotImplementedError
+
+class OllamaService(AIService):
+    def _get_ollama_url(self, endpoint):
+        return f"http://{self.args.ollama_host}:{self.args.ollama_port}{endpoint}"
+
+    def list_models(self):
+        try:
+            url = self._get_ollama_url('/api/tags')
+            with urllib.request.urlopen(url) as response:
+                data = json.loads(response.read().decode())
+                return [model['name'] for model in data.get('models', [])]
+        except Exception as e:
+            print(f"Error connecting to Ollama at {self.args.ollama_host}:{self.args.ollama_port}. Is Ollama running?", file=sys.stderr)
+            print(f"Details: {e}", file=sys.stderr)
+            return None
+
+    def generate_tags(self, rows):
+        print(f"Generating tags with Ollama using model: {self.args.ollama_model}...")
+
+        # Prepare the data for the prompt
+        freq_list_str = ""
+        for i, row in enumerate(rows):
+            # The row is a semicolon-delimited string. We need the frequency and description.
+            parts = row.split(';')
+            freq_hz = parts[0].strip()
+            desc = parts[1].strip()
+            freq_mhz = int(freq_hz) / 1_000_000
+            freq_list_str += f"{i}: {freq_mhz:.3f} MHz - {desc}\n"
+
+        prompt = (
+            "You are an expert in radio communications. Your task is to analyze a list of radio frequencies and their descriptions. "
+            "For each entry, provide a comma-separated list of 3-5 relevant, single-word, lowercase tags. "
+            "Focus on tags that describe the service type (e.g., 'ham', 'business', 'aviation', 'marine', 'public-safety'), "
+            "the modulation (e.g., 'fm', 'ssb', 'dmr', 'p25'), or the purpose (e.g., 'repeater', 'simplex', 'satellite', 'emergency').\n\n"
+            "Here is the list of frequencies:\n"
+            f"{freq_list_str}\n"
+            "Provide your response as a single JSON object, where each key is the entry's index number (as a string) and the value is the comma-separated string of tags. "
+            "Example: {\"0\": \"ham,repeater,vhf,fm\", \"1\": \"aviation,am,air-traffic-control\"}"
+        )
+
+        request_data = {
+            "model": self.args.ollama_model,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json"
+        }
+
+        try:
+            url = self._get_ollama_url('/api/generate')
+            req = urllib.request.Request(url, data=json.dumps(request_data).encode('utf-8'), headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req) as response:
+                body = response.read().decode()
+                response_data = json.loads(body)
+                ai_tags_str = response_data.get('response', '{}')
+                ai_tags = json.loads(ai_tags_str)
+        except Exception as e:
+            print(f"Error during Ollama API call: {e}", file=sys.stderr)
+            return rows, set()
+
+        # Integrate the AI tags back into the rows
+        new_rows = []
+        all_tags = set()
+        for i, row in enumerate(rows):
+            parts = row.split(';')
+            tags_from_ai = ai_tags.get(str(i), '')
+            parts[4] = f" {tags_from_ai.replace(',', ' ')}" # Add space for alignment
+            new_row = ";".join(parts)
+            new_rows.append(new_row)
+
+            if tags_from_ai:
+                all_tags.update(tags_from_ai.split(','))
+
+        return new_rows, all_tags
+
+def get_ai_service(args):
+    provider = args.ai_provider.lower()
+    if provider == 'ollama':
+        return OllamaService(args)
+    # Add other providers here as they are implemented
+    # elif provider == 'openai':
+    #     return OpenAIService(args)
+    else:
+        print(f"Error: AI provider '{provider}' is not supported.", file=sys.stderr)
+        sys.exit(1)
+
 
 def parse_web_data(html_content):
     soup = BeautifulSoup(html_content, 'lxml')
@@ -185,7 +283,7 @@ def main():
                "  gmark.py --url http://example.com/freqs bookmarks.csv\n"
                "  cat freqs.txt | gmark.py bookmarks.csv"
     )
-    parser.add_argument("output_file", help="Output CSV file for GQRX bookmarks.")
+    parser.add_argument("output_file", nargs='?', default=None, help="Output CSV file for GQRX bookmarks. Required unless listing models.")
     input_group = parser.add_mutually_exclusive_group()
     input_group.add_argument("--input-file", help="Input text file containing radio frequency data.")
     input_group.add_argument("--url", help="URL to fetch frequency data from.")
@@ -195,30 +293,60 @@ def main():
         action="store_true",
         help="Overwrite the output file if it exists. By default, new entries are appended."
     )
+
+    ai_group = parser.add_argument_group('AI Options for Tagging and Categorization')
+    ai_group.add_argument('--no-ai', action='store_true', help='Disable AI-powered categorization and tagging. Default is to use AI.')
+    ai_group.add_argument('--ai-provider', type=str, default='ollama', choices=['ollama', 'openai', 'anthropic', 'gemini', 'venice', 'deepseek'], help='The AI provider to use for processing frequencies. Default is "ollama".')
+    ai_group.add_argument('--api-key', type=str, help='API key for the selected cloud-based AI provider.')
+    ai_group.add_argument('--ollama-host', type=str, default='127.0.0.1', help='The hostname or IP address of the Ollama API server. Default is "127.0.0.1".')
+    ai_group.add_argument('--ollama-port', type=int, default=11434, help='The port number for the Ollama API server. Default is 11434.')
+    ai_group.add_argument('--ollama-model', type=str, default='llama3', help='The name of the Ollama model to use for processing. Default is "llama3".')
+    ai_group.add_argument('--list-ollama-models', action='store_true', help='List available models from the Ollama server and exit.')
+
     args = parser.parse_args()
+
+    ai_service = None
+    if not args.no_ai:
+        ai_service = get_ai_service(args)
+
+    if args.list_ollama_models:
+        if args.ai_provider == 'ollama':
+            models = ai_service.list_models()
+            if models is not None:
+                print("Available Ollama Models:")
+                for model in models:
+                    print(f"- {model}")
+            # The list_models function already prints errors
+        else:
+            print("Model listing is only supported for the 'ollama' provider.")
+        sys.exit(0)
+
+    if not args.output_file:
+        parser.error("the following arguments are required: output_file")
+
+    rows, tags = [], set()
 
     if args.url:
         html_content = get_web_content(args.url)
         if html_content:
             rows, tags = parse_web_data(html_content)
-            if not rows:
-                print("Could not find any frequencies in the URL.", file=sys.stderr)
-                sys.exit(1)
-            write_bookmarks(args.output_file, rows, tags, overwrite=args.new)
-        else:
-            sys.exit(1)
     elif args.input_file:
         with open(args.input_file, "r") as f:
-            input_data = f.readlines()
-        rows, tags = parse_data(input_data)
-        write_bookmarks(args.output_file, rows, tags, overwrite=args.new)
+            rows, tags = parse_data(f.readlines())
     elif not sys.stdin.isatty():
-        input_data = sys.stdin.readlines()
-        rows, tags = parse_data(input_data)
-        write_bookmarks(args.output_file, rows, tags, overwrite=args.new)
+        rows, tags = parse_data(sys.stdin.readlines())
     else:
         parser.print_help()
         sys.exit(1)
+
+    if not rows:
+        print("No frequency data found from the specified input.", file=sys.stderr)
+        sys.exit(1)
+
+    if ai_service:
+        rows, tags = ai_service.generate_tags(rows)
+
+    write_bookmarks(args.output_file, rows, tags, overwrite=args.new)
 
 if __name__ == "__main__":
     main()
